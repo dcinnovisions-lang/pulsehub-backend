@@ -1,0 +1,62 @@
+{
+  "name": "projva-server",
+  "version": "1.0.0",
+  "description": "Projva Backend API\n\n  First-time setup: Run `node ../setup.js` from the project root\n  Or see docs/SETUP.md for full setup instructions.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "jest --coverage",
+    "db:migrate": "sequelize-cli db:migrate",
+    "db:migrate:undo": "sequelize-cli db:migrate:undo",
+    "db:seed": "sequelize-cli db:seed:all",
+    "db:seed:undo": "sequelize-cli db:seed:undo:all",
+    "db:create": "sequelize-cli db:create",
+    "db:drop": "sequelize-cli db:drop",
+    "test:smtp": "node src/scripts/test-smtp.js",
+    "seed:demo": "node scripts/seed-demo.js"
+  },
+  "keywords": [
+    "express",
+    "api",
+    "rest",
+    "sequelize"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@reduxjs/toolkit": "^2.11.2",
+    "bcryptjs": "^2.4.3",
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "express-session": "^1.18.2",
+    "express-validator": "^7.0.1",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.1",
+    "nodemailer": "^7.0.12",
+    "passport": "^0.7.0",
+    "passport-google-oauth20": "^2.0.0",
+    "pg": "^8.11.3",
+    "pg-hstore": "^2.3.4",
+    "qrcode": "^1.5.4",
+    "razorpay": "^2.9.6",
+    "react-redux": "^9.2.0",
+    "sequelize": "^6.35.2",
+    "socket.io": "^4.7.5",
+    "speakeasy": "^2.0.0",
+    "uuid": "^9.0.1",
+    "winston": "^3.11.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.2",
+    "sequelize-cli": "^6.6.2",
+    "supertest": "^6.3.3"
+  }
+}
