@@ -2,11 +2,14 @@
 
 module.exports = {
   up: async (queryInterface, Sequelize) => {
-    await queryInterface.addColumn('chat_messages', 'attachment', {
-      type: Sequelize.JSONB,
-      allowNull: true,
-      defaultValue: null,
-    });
+    const table = await queryInterface.describeTable('chat_messages');
+    if (!table.attachment) {
+      await queryInterface.addColumn('chat_messages', 'attachment', {
+        type: Sequelize.JSONB,
+        allowNull: true,
+        defaultValue: null,
+      });
+    }
   },
 
   down: async (queryInterface) => {
