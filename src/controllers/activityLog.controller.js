@@ -1,6 +1,27 @@
-const { ActivityLog, User } = require('../models');
+const { ActivityLog, User, Workspace, WorkspaceMembers } = require('../models');
 const { Op } = require('sequelize');
+const { sequelize } = require('../config/database');
 const logger = require('../utils/logger');
+const { accessibleProjectIds } = require('../utils/projectAccess');
+
+// Limits a query to activity the caller is allowed to see (their workspaces/projects, or their own actions).
+const scopeCondition = async (user) => {
+  if (user.role === 'super_admin') return null;
+  const [projectIds, memberships, owned] = await Promise.all([
+    accessibleProjectIds(user),
+    WorkspaceMembers.findAll({ where: { userId: user.id }, attributes: ['workspaceId'], raw: true }),
+    Workspace.findAll({ where: { ownerId: user.id }, attributes: ['id'], raw: true })
+  ]);
+  const workspaceIds = [...new Set([...memberships.map((m) => m.workspaceId), ...owned.map((w) => w.id)])];
+  const none = '00000000-0000-0000-0000-000000000000';
+  return {
+    [Op.or]: [
+      { projectId: { [Op.in]: projectIds && projectIds.length ? projectIds : [none] } },
+      { workspaceId: { [Op.in]: workspaceIds.length ? workspaceIds : [none] } },
+      { userId: user.id }
+    ]
+  };
+};
 
 /**
  * @desc    Get activity logs for an entity
@@ -9,9 +30,12 @@ const logger = require('../utils/logger');
  */
 const getActivityLogs = async (req, res, next) => {
   try {
-    const { entityType, entityId, userId, action, page = 1, limit = 20 } = req.query;
+    const { entityType, entityId, userId, action, workspaceId, startDate, endDate, page = 1, limit = 20 } = req.query;
 
     const whereClause = {};
+    if (workspaceId) whereClause.workspaceId = workspaceId;
+    if (startDate && !Number.isNaN(new Date(startDate).getTime())) whereClause.createdAt = { ...(whereClause.createdAt || {}), [Op.gte]: new Date(startDate) };
+    if (endDate && !Number.isNaN(new Date(endDate).getTime())) { const end = new Date(endDate); end.setHours(23, 59, 59, 999); whereClause.createdAt = { ...(whereClause.createdAt || {}), [Op.lte]: end }; }
 
     if (entityType) {
       whereClause.entityType = entityType;
@@ -29,12 +53,15 @@ const getActivityLogs = async (req, res, next) => {
       whereClause.action = action;
     }
 
+    const scope = await scopeCondition(req.user);
+    const scopedWhere = scope ? { [Op.and]: [whereClause, scope] } : whereClause;
+
     const parsedPage  = Math.max(1, parseInt(page, 10) || 1);
     const parsedLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
     const offset = (parsedPage - 1) * parsedLimit;
 
     const { count: total, rows: logs } = await ActivityLog.findAndCountAll({
-      where: whereClause,
+      where: scopedWhere,
       include: [
         {
           model: User,
@@ -67,9 +94,12 @@ const getActivityLogs = async (req, res, next) => {
  */
 const exportActivityLogs = async (req, res, next) => {
   try {
-    const { entityType, entityId, userId, action } = req.query;
+    const { entityType, entityId, userId, action, workspaceId, startDate, endDate } = req.query;
 
     const whereClause = {};
+    if (workspaceId) whereClause.workspaceId = workspaceId;
+    if (startDate && !Number.isNaN(new Date(startDate).getTime())) whereClause.createdAt = { ...(whereClause.createdAt || {}), [Op.gte]: new Date(startDate) };
+    if (endDate && !Number.isNaN(new Date(endDate).getTime())) { const end = new Date(endDate); end.setHours(23, 59, 59, 999); whereClause.createdAt = { ...(whereClause.createdAt || {}), [Op.lte]: end }; }
 
     if (entityType) {
       whereClause.entityType = entityType;
@@ -87,8 +117,9 @@ const exportActivityLogs = async (req, res, next) => {
       whereClause.action = action;
     }
 
+    const scope = await scopeCondition(req.user);
     const logs = await ActivityLog.findAll({
-      where: whereClause,
+      where: scope ? { [Op.and]: [whereClause, scope] } : whereClause,
       include: [
         {
           model: User,
@@ -148,13 +179,34 @@ const exportActivityLogs = async (req, res, next) => {
  */
 const createActivityLog = async (entityType, entityId, action, userId, changes = null, metadata = null) => {
   try {
+    // Which project / workspace does this belong to? (drives who may see it)
+    let projectId = null;
+    let workspaceId = null;
+    try {
+      let rows = [];
+      if (entityType === 'task') {
+        [rows] = await sequelize.query('SELECT p.id AS project_id, p.workspace_id FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = :id', { replacements: { id: entityId } });
+      } else if (entityType === 'project') {
+        [rows] = await sequelize.query('SELECT id AS project_id, workspace_id FROM projects WHERE id = :id', { replacements: { id: entityId } });
+      } else if (entityType === 'workspace') {
+        rows = [{ project_id: null, workspace_id: entityId }];
+      } else if (entityType === 'comment') {
+        [rows] = await sequelize.query('SELECT p.id AS project_id, p.workspace_id FROM comments c JOIN tasks t ON t.id = c.task_id JOIN projects p ON p.id = t.project_id WHERE c.id = :id', { replacements: { id: entityId } });
+      } else if (entityType === 'attachment') {
+        [rows] = await sequelize.query('SELECT p.id AS project_id, p.workspace_id FROM attachments a JOIN tasks t ON t.id = a.task_id JOIN projects p ON p.id = t.project_id WHERE a.id = :id', { replacements: { id: entityId } });
+      }
+      if (rows && rows[0]) { projectId = rows[0].project_id || null; workspaceId = rows[0].workspace_id || null; }
+    } catch (_) { /* scope is best effort */ }
+
     const log = await ActivityLog.create({
       entityType,
       entityId,
       action,
       userId,
       changes,
-      metadata
+      metadata,
+      projectId,
+      workspaceId
     });
 
     return log;

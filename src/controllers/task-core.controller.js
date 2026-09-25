@@ -1,10 +1,12 @@
-const { Task, Project, List, Status, User, Subtask, Workspace, WorkspaceMembers } = require('../models');
+const { Task, Project, List, Status, User, Subtask, Workspace, WorkspaceMembers, ProjectMembers, Sprint, Release } = require('../models');
 const { Op } = require('sequelize');
 const logger = require('../utils/logger');
 const { createActivityLog } = require('./activityLog.controller');
 const { createNotification } = require('./notification.controller');
 const { runAutomations } = require('../utils/automationEngine');
 const { emitTaskUpdated, getIO } = require('../socket');
+const { buildIssueFields } = require('../utils/issueFields');
+const { applyBugHandoff } = require('../utils/bugWorkflow');
 
 /**
  * @desc    Get all tasks
@@ -13,7 +15,7 @@ const { emitTaskUpdated, getIO } = require('../socket');
  */
 const getTasks = async (req, res, next) => {
   try {
-    const { projectId, listId, statusId, assigneeId } = req.query;
+    const { projectId, listId, statusId, assigneeId, issueType, sprintId, epicId, releaseId, q } = req.query;
     const page   = Math.max(1, parseInt(req.query.page)  || 1);
     const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
     const offset = (page - 1) * limit;
@@ -23,6 +25,22 @@ const getTasks = async (req, res, next) => {
     const whereClause = {};
     if (listId) whereClause.listId = listId;
     if (statusId) whereClause.statusId = statusId;
+    if (issueType) whereClause.issueType = issueType;
+    if (epicId) whereClause.epicId = epicId;
+    if (releaseId) whereClause.releaseId = releaseId;
+    if (sprintId === 'backlog') whereClause.sprintId = { [Op.is]: null };
+    else if (sprintId) whereClause.sprintId = sprintId;
+    if (q && String(q).trim()) {
+      const term = `%${String(q).trim().replace(/[%_]/g, '')}%`;
+      whereClause[Op.or] = [{ title: { [Op.iLike]: term } }, { taskKey: { [Op.iLike]: term } }];
+    }
+
+    // 'reporter' project members only see the issues they reported (Jira-style issue submitters)
+    const reporterRows = await ProjectMembers.findAll({ where: { userId, role: 'reporter' }, attributes: ['projectId'] });
+    const reporterProjectIds = reporterRows.map((r) => r.projectId);
+    if (reporterProjectIds.length > 0) {
+      whereClause[Op.and] = [{ [Op.or]: [{ projectId: { [Op.notIn]: reporterProjectIds } }, { createdBy: userId }] }];
+    }
 
     // Super admin can see all tasks
     let accessibleProjectIds = null;
@@ -120,16 +138,15 @@ const getTasks = async (req, res, next) => {
         model: Subtask,
         as: 'subtasks',
         attributes: ['id', 'title', 'isCompleted', 'position']
-      }
+      },
+      { model: Sprint, as: 'sprint', attributes: ['id', 'name', 'status'] },
+      { model: Release, as: 'release', attributes: ['id', 'name', 'status'] },
+      { model: Task, as: 'epic', attributes: ['id', 'title', 'taskKey'] }
     ];
 
-    // Filter by assignee
+    // Filter by assignee (everyone else sees all issues of the projects they belong to)
     if (assigneeId) {
       includeOptions[4].where = { id: assigneeId };
-      includeOptions[4].required = true; // Use INNER JOIN to only get tasks with this assignee
-    } else if (userRole === 'member' || userRole === 'viewer') {
-      // For members/viewers, only show tasks assigned to them
-      includeOptions[4].where = { id: userId };
       includeOptions[4].required = true; // Use INNER JOIN to only get tasks with this assignee
     }
 
@@ -206,7 +223,11 @@ const getTaskById = async (req, res, next) => {
             as: 'assignee',
             attributes: ['id', 'email', 'firstName', 'lastName', 'avatar']
           }]
-        }
+        },
+        { model: Sprint, as: 'sprint', attributes: ['id', 'name', 'status'] },
+        { model: Release, as: 'release', attributes: ['id', 'name', 'status'] },
+        { model: Task, as: 'epic', attributes: ['id', 'title', 'taskKey'] },
+        { model: User, as: 'fixer', attributes: ['id', 'email', 'firstName', 'lastName', 'avatar'] }
       ]
     });
 
@@ -256,6 +277,11 @@ const createTask = async (req, res, next) => {
       });
     }
 
+    const { fields: issueFields, error: issueError } = await buildIssueFields(req.body, projectId);
+    if (issueError) {
+      return res.status(400).json({ success: false, error: issueError });
+    }
+
     // Authorization is handled by checkPermission middleware (RBAC).
 
     // Get max position for the list
@@ -277,7 +303,8 @@ const createTask = async (req, res, next) => {
       startDate,
       estimatedHours,
       createdBy: req.user.id,
-      position: (maxPosition || 0) + 1
+      position: (maxPosition || 0) + 1,
+      ...issueFields
     });
 
     // Add assignees if provided
@@ -316,7 +343,7 @@ const createTask = async (req, res, next) => {
             entityType: 'task',
             entityId:   task.id,
             actorId:    req.user.id,
-            metadata:   { url: `/app/projects/${task.projectId}/tasks/${task.id}`, projectId: task.projectId }
+            metadata:   { url: `/app/tasks/${task.id}`, projectId: task.projectId }
           })
         )
       );
@@ -360,11 +387,25 @@ const updateTask = async (req, res, next) => {
       dueDate,
       startDate,
       estimatedHours,
-      assigneeIds,
       position,
       progress,
       labels
     } = req.body;
+    let { assigneeIds } = req.body;
+
+    const { fields: issueFields, error: issueError } = await buildIssueFields(req.body, task.projectId);
+    if (issueError) {
+      return res.status(400).json({ success: false, error: issueError });
+    }
+    if (issueFields.epicId && issueFields.epicId === task.id) {
+      return res.status(400).json({ success: false, error: 'An epic cannot be its own child' });
+    }
+
+    // Bug QA hand-off (Ready for Retest -> reporter, Reopened -> fixer). Overrides manual assignees.
+    const handoff = statusId !== undefined
+      ? await applyBugHandoff({ task, statusId, actor: req.user })
+      : null;
+    if (handoff) assigneeIds = undefined;
 
     // Track changes for activity log
     const changes = {};
@@ -386,8 +427,10 @@ const updateTask = async (req, res, next) => {
     if (statusId !== undefined && statusId !== task.statusId) {
       changes.statusId = { old: task.statusId, new: statusId };
       // Get status names for better logging
-      const oldStatus = await Status.findByPk(task.statusId);
-      const newStatus = await Status.findByPk(statusId);
+      const [oldStatus, newStatus] = await Promise.all([
+        Status.findByPk(task.statusId),
+        Status.findByPk(statusId)
+      ]);
       if (oldStatus && newStatus) {
         changes.statusId = { old: oldStatus.name, new: newStatus.name };
       }
@@ -397,6 +440,10 @@ const updateTask = async (req, res, next) => {
     if (startDate !== undefined && startDate !== task.startDate) changes.startDate = { old: task.startDate, new: startDate };
     if (estimatedHours !== undefined && estimatedHours !== task.estimatedHours) changes.estimatedHours = { old: task.estimatedHours, new: estimatedHours };
     if (progress !== undefined && progress !== task.progress) changes.progress = { old: task.progress, new: progress };
+    for (const [k, v] of Object.entries(issueFields)) {
+      if (String(task[k] ?? '') !== String(v ?? '')) changes[k] = { old: task[k], new: v };
+    }
+    if (handoff) changes.handoff = { old: null, new: handoff.kind };
 
     await task.update({
       title: title !== undefined ? title : task.title,
@@ -409,7 +456,8 @@ const updateTask = async (req, res, next) => {
       estimatedHours: estimatedHours !== undefined ? estimatedHours : task.estimatedHours,
       position: position !== undefined ? position : task.position,
       progress: progress !== undefined ? progress : task.progress,
-      labels: labels !== undefined ? labels : task.labels
+      labels: labels !== undefined ? labels : task.labels,
+      ...issueFields
     });
 
     // Update assignees if provided
@@ -495,7 +543,7 @@ const updateTask = async (req, res, next) => {
               entityType: 'task',
               entityId:   task.id,
               actorId:    req.user.id,
-              metadata:   { url: `/app/projects/${task.projectId}/tasks/${task.id}`, projectId: task.projectId }
+              metadata:   { url: `/app/tasks/${task.id}`, projectId: task.projectId }
             })
           )
         );
@@ -631,12 +679,14 @@ const reorderTasks = async (req, res, next) => {
     await Promise.all(updatePromises);
 
     // Log activity for each moved task
-    for (const taskId of taskIds) {
-      await createActivityLog('task', taskId, 'moved', req.user.id, {
-        position: taskIds.indexOf(taskId) + 1,
-        listId: listId || null
-      });
-    }
+    await Promise.all(
+      taskIds.map((taskId, index) =>
+        createActivityLog('task', taskId, 'moved', req.user.id, {
+          position: index + 1,
+          listId: listId || null
+        })
+      )
+    );
 
     res.status(200).json({
       success: true,

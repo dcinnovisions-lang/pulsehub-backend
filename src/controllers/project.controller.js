@@ -4,6 +4,38 @@ const { Op } = require('sequelize');
 const logger = require('../utils/logger');
 
 /**
+ * Adds the caller's own roles to project responses so the UI can show or hide actions correctly:
+ *   myProjectRole   - role in project_members (project_lead, contributor, reporter, ...)
+ *   myWorkspaceRole - role in the project's workspace ('owner' for the workspace owner)
+ */
+const withMyRoles = async (input, user) => {
+  try {
+    const list = Array.isArray(input) ? input : [input];
+    if (list.length === 0) return input;
+    const projectIds = list.map((p) => p.id);
+    const workspaceIds = [...new Set(list.map((p) => p.workspaceId))];
+    const [pm, wm, owned] = await Promise.all([
+      ProjectMembers.findAll({ where: { userId: user.id, projectId: { [Op.in]: projectIds } }, attributes: ['projectId', 'role'], raw: true }),
+      WorkspaceMembers.findAll({ where: { userId: user.id, workspaceId: { [Op.in]: workspaceIds } }, attributes: ['workspaceId', 'role'], raw: true }),
+      Workspace.findAll({ where: { ownerId: user.id, id: { [Op.in]: workspaceIds } }, attributes: ['id'], raw: true })
+    ]);
+    const pmMap = Object.fromEntries((pm || []).map((r) => [r.projectId, r.role]));
+    const wmMap = Object.fromEntries((wm || []).map((r) => [r.workspaceId, r.role]));
+    const ownedSet = new Set((owned || []).map((r) => r.id));
+    const decorate = (p) => {
+      const json = typeof p.toJSON === 'function' ? p.toJSON() : { ...p };
+      json.myProjectRole = pmMap[p.id] || null;
+      json.myWorkspaceRole = ownedSet.has(p.workspaceId) ? 'owner' : (wmMap[p.workspaceId] || null);
+      return json;
+    };
+    return Array.isArray(input) ? list.map(decorate) : decorate(input);
+  } catch (err) {
+    logger.warn('Could not attach caller roles to project response:', err.message);
+    return input;
+  }
+};
+
+/**
  * @desc    Get all projects for current user
  * @route   GET /api/v1/projects
  * @access  Private
@@ -92,7 +124,7 @@ const getProjects = async (req, res, next) => {
         hasNextPage: page < Math.ceil(count / limit),
         hasPrevPage: page > 1
       },
-      data: projects
+      data: await withMyRoles(projects, req.user)
     });
   } catch (error) {
     logger.error('Get projects error:', error);
@@ -136,7 +168,7 @@ const getProjectById = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      data: project
+      data: await withMyRoles(project, req.user)
     });
   } catch (error) {
     logger.error('Get project by ID error:', error);
@@ -151,7 +183,7 @@ const getProjectById = async (req, res, next) => {
  */
 const createProject = async (req, res, next) => {
   try {
-    const { name, description, workspaceId, color, templateId } = req.body;
+    const { name, description, workspaceId, color, templateId, key } = req.body;
 
     // Verify workspace exists and user has access
     const workspace = await Workspace.findByPk(workspaceId);
@@ -196,14 +228,17 @@ const createProject = async (req, res, next) => {
       description,
       workspaceId,
       color: color || '#3B82F6',
-      templateId
+      templateId,
+      key
     });
 
     // Create default statuses (similar to Jira/ClickUp workflow)
     const defaultStatuses = [
       { name: 'To Do', color: '#94A3B8', position: 0, isDefault: true },
       { name: 'In Progress', color: '#3B82F6', position: 1, isDefault: false },
-      { name: 'Done', color: '#10B981', position: 2, isDefault: false }
+      { name: 'Ready for Retest', color: '#F59E0B', position: 2, isDefault: false },
+      { name: 'Reopened', color: '#EF4444', position: 3, isDefault: false },
+      { name: 'Done', color: '#10B981', position: 4, isDefault: false }
     ];
 
     await Promise.all(
@@ -269,14 +304,36 @@ const updateProject = async (req, res, next) => {
       });
     }
 
-    const { name, description, status, color } = req.body;
+    const { name, description, status, color, key } = req.body;
+
+    // Changing the project key re-labels every issue (SE-1 -> SCH-1). Keys are unique across projects.
+    let newKey = null;
+    if (key !== undefined && String(key).toUpperCase().replace(/[^A-Z0-9]/g, '') !== project.key) {
+      newKey = String(key).toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (newKey.length < 2 || newKey.length > 10) {
+        return res.status(400).json({ success: false, error: 'Project key must be 2-10 letters or numbers' });
+      }
+      const clash = await Project.findOne({ where: { key: newKey }, attributes: ['id'] });
+      if (clash) {
+        return res.status(400).json({ success: false, error: `The key ${newKey} is already used by another project` });
+      }
+    }
 
     await project.update({
       name: name || project.name,
       description: description !== undefined ? description : project.description,
       status: status || project.status,
-      color: color || project.color
+      color: color || project.color,
+      ...(newKey ? { key: newKey } : {})
     });
+
+    if (newKey) {
+      const { sequelize } = require('../config/database');
+      await sequelize.query(
+        "UPDATE tasks SET task_key = :key || '-' || task_number WHERE project_id = :id AND task_number IS NOT NULL",
+        { replacements: { key: newKey, id: project.id } }
+      );
+    }
 
     // Reload with associations
     await project.reload({

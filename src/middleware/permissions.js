@@ -8,6 +8,7 @@
 
 const { Op } = require('sequelize');
 const logger = require('../utils/logger');
+const { EDITABLE_ROLES, loadOverrides } = require('../utils/permissionOverrides');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PERMISSION MATRIX
@@ -219,7 +220,7 @@ const PERMISSION_MATRIX = {
 async function resolvePermission ({
   user, workspaceId, projectId,
   resource, action,
-  itemOwnerId, assigneeIds = []
+  itemOwnerId, assigneeIds = [], loadItem
 }) {
   const { WorkspaceMembers, ProjectMembers, GuestAccess, Workspace } = require('../models');
 
@@ -277,8 +278,26 @@ async function resolvePermission ({
       return resolveGuestPermission({ user, workspaceId, projectId, resource, action, GuestAccess });
     }
 
-    // ── Step 7: Evaluate against permission matrix ───────────────────────────
-    const result = evaluateMatrix(effectiveRole, resource, action, user.id, itemOwnerId, assigneeIds);
+    // ── Step 7: Evaluate against permission matrix (plus the workspace / project permission scheme) ──
+    // Ownership-scoped rules ('own', 'assigned', 'own_or_assigned') need the target item.
+    let ownerId = itemOwnerId;
+    let assignees = assigneeIds;
+    let override;
+    if (EDITABLE_ROLES.includes(effectiveRole)) {
+      const scheme = await loadOverrides(workspaceId, projectId);
+      override = scheme[effectiveRole] && scheme[effectiveRole][resource] ? scheme[effectiveRole][resource][action] : undefined;
+    }
+    const ruleValue = override !== undefined
+      ? override
+      : (PERMISSION_MATRIX[effectiveRole] && PERMISSION_MATRIX[effectiveRole][resource]
+        ? PERMISSION_MATRIX[effectiveRole][resource][action]
+        : undefined);
+    if (loadItem && ownerId === undefined && ['own', 'assigned', 'own_or_assigned'].includes(ruleValue)) {
+      const ctx = await loadItem();
+      ownerId = ctx.itemOwnerId;
+      assignees = ctx.assigneeIds;
+    }
+    const result = evaluateMatrix(effectiveRole, resource, action, user.id, ownerId, assignees, override);
     return { ...result, effectiveRole };
 
   } catch (err) {
@@ -291,14 +310,20 @@ async function resolvePermission ({
 // MATRIX EVALUATION HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-function evaluateMatrix (role, resource, action, userId, itemOwnerId, assigneeIds) {
-  const roleMatrix = PERMISSION_MATRIX[role];
-  if (!roleMatrix) return { allowed: false, reason: `unknown_role:${role}` };
+function evaluateMatrix (role, resource, action, userId, itemOwnerId, assigneeIds, override) {
+  let actionValue;
+  if (override !== undefined) {
+    // A permission scheme explicitly sets this rule
+    actionValue = override;
+  } else {
+    const roleMatrix = PERMISSION_MATRIX[role];
+    if (!roleMatrix) return { allowed: false, reason: `unknown_role:${role}` };
 
-  const resourceMatrix = roleMatrix[resource];
-  if (!resourceMatrix) return { allowed: false, reason: `resource_not_granted:${resource}` };
+    const resourceMatrix = roleMatrix[resource];
+    if (!resourceMatrix) return { allowed: false, reason: `resource_not_granted:${resource}` };
 
-  const actionValue = resourceMatrix[action];
+    actionValue = resourceMatrix[action];
+  }
 
   if (actionValue === true)  return { allowed: true };
   if (!actionValue)          return { allowed: false, reason: `action_denied:${action}` };
@@ -363,10 +388,58 @@ async function resolveGuestPermission ({ user, workspaceId, projectId, resource,
  * @param {string} opts.action           - action key
  * @param {boolean} [opts.requireOwnership] - if true, pass itemOwnerId via req.itemOwnerId in handler or preceding middleware
  */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Loads the item a request targets so 'own' / 'own_or_assigned' / 'assigned' rules can be evaluated.
+ * Returns { itemOwnerId, assigneeIds, projectId } (projectId lets routes addressed by a comment /
+ * attachment / time-log id resolve their workspace through the parent task).
+ */
+const loadItemContext = async (req, resource) => {
+  const { Task, TaskAssignees, Subtask, Comment, Attachment, TimeLog } = require('../models');
+  const p = req.params;
+  const ok = (v) => typeof v === 'string' && UUID_RE.test(v);
+  let itemOwnerId = null;
+  let extraAssignee = null;
+  let task = null;
+
+  // Reuse the task the middleware already loaded for this request (avoids a second query)
+  const taskById = (id) => (req._permTask || (ok(id) ? Task.findByPk(id, { attributes: ['id', 'projectId', 'createdBy'] }) : null));
+
+  if (resource === 'task') {
+    task = await taskById(p.taskId || p.id);
+    if (task) itemOwnerId = task.createdBy;
+  } else if (resource === 'subtask') {
+    task = await taskById(p.taskId);
+    if (task) itemOwnerId = task.createdBy;
+    if (ok(p.subtaskId)) {
+      const st = await Subtask.findByPk(p.subtaskId, { attributes: ['id', 'assigneeId'] });
+      if (st && st.assigneeId) extraAssignee = st.assigneeId;
+    }
+  } else if (resource === 'comment' && ok(p.id)) {
+    const c = await Comment.findByPk(p.id, { attributes: ['id', 'userId', 'taskId'] });
+    if (c) { itemOwnerId = c.userId; task = await taskById(c.taskId); }
+  } else if (resource === 'attachment' && ok(p.id)) {
+    const a = await Attachment.findByPk(p.id, { attributes: ['id', 'uploadedBy', 'taskId'] });
+    if (a) { itemOwnerId = a.uploadedBy; task = await taskById(a.taskId); }
+  } else if (resource === 'time_log' && ok(p.id)) {
+    const t = await TimeLog.findByPk(p.id, { attributes: ['id', 'userId', 'taskId'] });
+    if (t) { itemOwnerId = t.userId; task = await taskById(t.taskId); }
+  }
+
+  let assigneeIds = [];
+  if (task) {
+    const rows = await TaskAssignees.findAll({ where: { task_id: task.id }, attributes: ['user_id'], raw: true });
+    assigneeIds = rows.map((r) => r.user_id);
+  }
+  if (extraAssignee) assigneeIds.push(extraAssignee);
+  return { itemOwnerId, assigneeIds, projectId: task ? task.projectId : null };
+};
+
 const checkPermission = ({ resource, action, requireOwnership = false }) => {
   return async (req, res, next) => {
     try {
-      const projectId   = req.params.projectId || req.params.id || req.body.projectId;
+      let   projectId   = req.params.projectId || req.params.id || req.body.projectId;
       let   workspaceId = req.params.workspaceId || req.body.workspaceId || req.query.workspaceId;
 
       // Auto-resolve workspaceId from project when not explicitly provided.
@@ -382,8 +455,10 @@ const checkPermission = ({ resource, action, requireOwnership = false }) => {
               workspaceId = proj.workspaceId;
             } else {
               // projectId might actually be a taskId on task routes (req.params.id)
-              const task = await Task.findByPk(projectId, { attributes: ['id', 'projectId'] });
+              const task = await Task.findByPk(projectId, { attributes: ['id', 'projectId', 'createdBy'] });
               if (task) {
+                req._permTask = task;
+                projectId = task.projectId;
                 const taskProj = await Project.findByPk(task.projectId, { attributes: ['workspaceId'] });
                 if (taskProj) workspaceId = taskProj.workspaceId;
               }
@@ -391,13 +466,39 @@ const checkPermission = ({ resource, action, requireOwnership = false }) => {
           }
           // Also resolve via :taskId param (subtask/time-log nested routes)
           if (!workspaceId && req.params.taskId) {
-            const task = await Task.findByPk(req.params.taskId, { attributes: ['id', 'projectId'] });
+            const task = await Task.findByPk(req.params.taskId, { attributes: ['id', 'projectId', 'createdBy'] });
             if (task) {
+              req._permTask = task;
+              projectId = task.projectId;
               const taskProj = await Project.findByPk(task.projectId, { attributes: ['workspaceId'] });
               if (taskProj) workspaceId = taskProj.workspaceId;
             }
           }
         } catch (_) { /* non-critical — continue without workspaceId */ }
+      }
+
+      // Owner / assignee of the targeted item — loaded lazily, only when a rule needs it
+      let itemCtx = null;
+      const loadItem = async () => {
+        if (!itemCtx) {
+          try { itemCtx = await loadItemContext(req, resource); }
+          catch (_) { itemCtx = { itemOwnerId: null, assigneeIds: [], projectId: null }; }
+        }
+        return itemCtx;
+      };
+
+      // Routes addressed by a comment / attachment / time-log id carry no project or workspace,
+      // so resolve them through the item's parent task.
+      if (!workspaceId && req.user.role !== 'super_admin') {
+        const ctx = await loadItem();
+        if (ctx.projectId) {
+          projectId = ctx.projectId;
+          try {
+            const { Project } = require('../models');
+            const proj = await Project.findByPk(ctx.projectId, { attributes: ['id', 'workspaceId'] });
+            if (proj) workspaceId = proj.workspaceId;
+          } catch (_) { /* non-critical */ }
+        }
       }
 
       const { allowed, reason, effectiveRole } = await resolvePermission({
@@ -406,8 +507,9 @@ const checkPermission = ({ resource, action, requireOwnership = false }) => {
         projectId,
         resource,
         action,
-        itemOwnerId:  req.itemOwnerId  || null,
-        assigneeIds:  req.assigneeIds  || []
+        itemOwnerId:  req.itemOwnerId,
+        assigneeIds:  req.assigneeIds,
+        loadItem
       });
 
       if (!allowed) {

@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
-const { User } = require('../models');
+const crypto = require('crypto');
+const { User, ApiKey } = require('../models');
 const logger = require('../utils/logger');
 
 /**
@@ -18,6 +19,19 @@ const authenticate = async (req, res, next) => {
     }
 
     const token = authHeader.substring(7); // Remove 'Bearer ' prefix
+
+    // Personal API key (pk_...) instead of a JWT
+    if (token.startsWith('pk_')) {
+      const keyHash = crypto.createHash('sha256').update(token).digest('hex');
+      const apiKey = await ApiKey.findOne({ where: { keyHash } });
+      const keyUser = apiKey && await User.findByPk(apiKey.userId, { attributes: { exclude: ['password'] } });
+      if (!keyUser) {
+        return res.status(401).json({ success: false, error: 'Invalid API key' });
+      }
+      apiKey.update({ lastUsed: new Date() }).catch(() => {});
+      req.user = keyUser;
+      return next();
+    }
 
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);

@@ -24,6 +24,12 @@ const Resource = require('./Resource');
 const Budget = require('./Budget');
 const BudgetExpense = require('./BudgetExpense');
 const SavedView = require('./SavedView');
+const ApiKey = require('./ApiKey');
+const Sprint = require('./Sprint');
+const Release = require('./Release');
+const AuditLog = require('./AuditLog');
+const PermissionOverride = require('./PermissionOverride');
+const SsoConfig = require('./SsoConfig');
 const Document = require('./Document');
 const Whiteboard = require('./Whiteboard');
 const WhiteboardElement = require('./WhiteboardElement');
@@ -63,6 +69,12 @@ const models = {
   Budget,
   BudgetExpense,
   SavedView,
+  ApiKey,
+  Sprint,
+  Release,
+  AuditLog,
+  PermissionOverride,
+  SsoConfig,
   Document,
   Whiteboard,
   WhiteboardElement,

@@ -221,10 +221,7 @@ describe('PUT /api/v1/users/:id — update user', () => {
     expect(res.status).toBe(200);
   });
 
-  it('200 — admin can update another user (controller allows admin role)', async () => {
-    // NOTE: The controller checks req.user.role === 'admin' (not super_admin) for
-    // cross-user updates. super_admin gets 403 here — this is a known controller
-    // quirk (super_admin should ideally also be allowed). Test matches actual behavior.
+  it('200 — admin can update another user', async () => {
     const admin = buildMockUser({ ...mockUsers.admin });
     const target = buildMockUser({ id: 'uuid-target', email: 'target@test.com' });
     User.findByPk
@@ -239,15 +236,30 @@ describe('PUT /api/v1/users/:id — update user', () => {
     expect(res.status).toBe(200);
   });
 
-  it('403 — super_admin cannot update another user via this endpoint (controller quirk)', async () => {
-    // The updateUser controller only allows role==='admin' for cross-user updates.
-    // super_admin gets 403 — tracked as known issue for future fix.
+  it('200 — super_admin can update another user', async () => {
+    // updateUser's cross-user bypass (user.controller.js:156) includes
+    // 'admin', 'super_admin', and 'owner' — super_admin is allowed here.
     const sa = buildMockUser({ ...mockUsers.super_admin });
-    User.findByPk.mockResolvedValueOnce(sa); // authenticate
+    const target = buildMockUser({ id: 'uuid-other-user', email: 'target@test.com' });
+    User.findByPk
+      .mockResolvedValueOnce(sa)      // authenticate
+      .mockResolvedValueOnce(target); // updateUser
 
     const res = await request(app)
       .put('/api/v1/users/uuid-other-user')
       .set('Authorization', bearerFor('super_admin'))
+      .send({ firstName: 'Changed' });
+
+    expect(res.status).toBe(200);
+  });
+
+  it('403 — member cannot update another user\'s profile', async () => {
+    const member = buildMockUser({ ...mockUsers.member });
+    User.findByPk.mockResolvedValueOnce(member); // authenticate
+
+    const res = await request(app)
+      .put('/api/v1/users/uuid-other-user')
+      .set('Authorization', bearerFor('member'))
       .send({ firstName: 'Changed' });
 
     expect(res.status).toBe(403);

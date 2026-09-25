@@ -38,7 +38,9 @@ const getStatusesByProject = async (req, res, next) => {
       const defaultStatuses = [
         { name: 'To Do', color: '#94A3B8', position: 0, isDefault: true },
         { name: 'In Progress', color: '#3B82F6', position: 1, isDefault: false },
-        { name: 'Done', color: '#10B981', position: 2, isDefault: false }
+        { name: 'Ready for Retest', color: '#F59E0B', position: 2, isDefault: false },
+        { name: 'Reopened', color: '#EF4444', position: 3, isDefault: false },
+        { name: 'Done', color: '#10B981', position: 4, isDefault: false }
       ];
 
       await Promise.all(

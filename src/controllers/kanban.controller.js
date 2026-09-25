@@ -10,7 +10,7 @@ const logger = require('../utils/logger');
 const getKanbanBoard = async (req, res, next) => {
   try {
     const projectId = req.params.id || req.params.projectId;
-    const { listId } = req.query;
+    const { listId, sprintId, issueType } = req.query;
 
     // Verify project exists
     const project = await Project.findByPk(projectId);
@@ -37,6 +37,9 @@ const getKanbanBoard = async (req, res, next) => {
     if (listId) {
       whereClause.listId = listId;
     }
+    if (sprintId === 'backlog') whereClause.sprintId = { [Op.is]: null };
+    else if (sprintId) whereClause.sprintId = sprintId;
+    if (issueType) whereClause.issueType = issueType;
 
     // Get all tasks for the project
     const tasks = await Task.findAll({
@@ -79,6 +82,12 @@ const getKanbanBoard = async (req, res, next) => {
         tasks: columnTasks.map(task => ({
           id: task.id,
           title: task.title,
+          taskKey: task.taskKey,
+          issueType: task.issueType,
+          storyPoints: task.storyPoints,
+          severity: task.severity,
+          sprintId: task.sprintId,
+          epicId: task.epicId,
           description: task.description,
           priority: task.priority,
           dueDate: task.dueDate,
@@ -104,6 +113,12 @@ const getKanbanBoard = async (req, res, next) => {
         tasks: unassignedTasks.map(task => ({
           id: task.id,
           title: task.title,
+          taskKey: task.taskKey,
+          issueType: task.issueType,
+          storyPoints: task.storyPoints,
+          severity: task.severity,
+          sprintId: task.sprintId,
+          epicId: task.epicId,
           description: task.description,
           priority: task.priority,
           dueDate: task.dueDate,
@@ -140,7 +155,7 @@ const getKanbanBoard = async (req, res, next) => {
  */
 const moveTask = async (req, res, next) => {
   try {
-    const { taskId } = req.params;
+    const taskId = req.params.taskId || req.params.id;
     const { statusId, position, listId } = req.body;
 
     const task = await Task.findByPk(taskId);
@@ -149,6 +164,12 @@ const moveTask = async (req, res, next) => {
         success: false,
         error: 'Task not found'
       });
+    }
+
+    // Bug QA hand-off (Ready for Retest -> reporter, Reopened -> fixer)
+    if (statusId !== undefined) {
+      const { applyBugHandoff } = require('../utils/bugWorkflow');
+      await applyBugHandoff({ task, statusId, actor: req.user });
     }
 
     // Update task

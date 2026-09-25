@@ -151,7 +151,7 @@ const createComment = async (req, res, next) => {
       const actorName = `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || 'Someone';
       const notifTitle = `New comment on "${task.title}"`;
       const notifBody  = `${actorName}: ${content.trim().substring(0, 100)}${content.trim().length > 100 ? '…' : ''}`;
-      const notifMeta  = { url: `/app/projects/${task.projectId}/tasks/${task.id}`, projectId: task.projectId };
+      const notifMeta  = { url: `/app/tasks/${task.id}`, projectId: task.projectId };
 
       // Collect recipients: task creator + current assignees, deduplicated
       const assigneeRows = await TaskAssignees.findAll({ where: { taskId }, attributes: ['userId'] });
@@ -179,33 +179,45 @@ const createComment = async (req, res, next) => {
     }
 
     // ── @mention notifications ────────────────────────────────────────────
+    // Handles look like @firstnamelastname. Anyone with access to the project's workspace can be mentioned
+    // (project members, workspace members and the workspace owner).
     try {
       const mentionMatches = [...new Set((content.match(/@(\w+)/g) || []).map(m => m.slice(1).toLowerCase()))];
       if (mentionMatches.length > 0) {
-        const projectMembers = await ProjectMembers.findAll({
-          where: { projectId: task.projectId },
-          attributes: ['userId'],
-          include: [{ model: User, as: 'user', attributes: ['id', 'firstName', 'lastName'] }],
-        });
+        const { WorkspaceMembers, Workspace, Project } = require('../models');
+        const project = await Project.findByPk(task.projectId, { attributes: ['id', 'workspaceId'] });
+        const [projectMembers, workspaceMembers, workspace] = await Promise.all([
+          ProjectMembers.findAll({ where: { projectId: task.projectId }, attributes: ['userId'] }),
+          project ? WorkspaceMembers.findAll({ where: { workspaceId: project.workspaceId }, attributes: ['userId'] }) : [],
+          project ? Workspace.findByPk(project.workspaceId, { attributes: ['id', 'ownerId'] }) : null
+        ]);
+        const candidateIds = [...new Set([
+          ...(projectMembers || []).map(m => m.userId),
+          ...(workspaceMembers || []).map(m => m.userId),
+          ...(workspace && workspace.ownerId ? [workspace.ownerId] : [])
+        ])].filter(id => String(id) !== String(userId));
+
+        const candidates = candidateIds.length
+          ? await User.findAll({ where: { id: candidateIds }, attributes: ['id', 'firstName', 'lastName', 'email'] })
+          : [];
         const actorName = `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || 'Someone';
         await Promise.allSettled(
-          projectMembers
-            .filter(m => {
-              const u = m.user;
-              if (!u || String(u.id) === String(userId)) return false;
+          candidates
+            .filter(u => {
               const handle = `${u.firstName || ''}${u.lastName || ''}`.replace(/\s+/g, '').toLowerCase();
-              return mentionMatches.includes(handle);
+              const emailHandle = String(u.email || '').split('@')[0].toLowerCase();
+              return mentionMatches.includes(handle) || mentionMatches.includes(emailHandle);
             })
-            .map(m =>
+            .map(u =>
               createNotification({
-                userId: m.userId,
+                userId: u.id,
                 type: 'task_mentioned',
                 title: `${actorName} mentioned you on "${task.title}"`,
-                body: content.trim().substring(0, 120),
+                body: content.trim().substring(0, 200),
                 entityType: 'task',
                 entityId: taskId,
                 actorId: userId,
-                metadata: { url: `/app/projects/${task.projectId}/tasks/${task.id}`, projectId: task.projectId },
+                metadata: { url: `/app/tasks/${task.id}`, projectId: task.projectId },
               })
             )
         );

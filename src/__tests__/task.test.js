@@ -10,11 +10,9 @@
  *   PUT    /api/v1/tasks/:id
  *   DELETE /api/v1/tasks/:id
  *   POST   /api/v1/tasks/bulk  (bulkCreate)
+ *   PUT    /api/v1/tasks/bulk  (bulkUpdate)
+ *   DELETE /api/v1/tasks/bulk  (bulkDelete / archive)
  *   POST   /api/v1/tasks/:taskId/subtasks
- *
- * NOTE — BUG-004: PUT /tasks/bulk and DELETE /tasks/bulk are shadowed by
- *   PUT /:id and DELETE /:id (defined earlier in task.routes.js).
- *   Tests for those routes are omitted here; see BUG_TRACKER.md.
  */
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -187,7 +185,7 @@ const mockPermAutoResolve = () => {
 // ── GET /api/v1/tasks ──────────────────────────────────────────────────────────
 
 describe('GET /api/v1/tasks — list tasks', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => { jest.clearAllMocks(); ProjectMembers.findAll.mockResolvedValue([]); });
 
   it('TASK-011 — 200: super_admin lists all tasks', async () => {
     setupSA();
@@ -577,6 +575,151 @@ describe('POST /api/v1/tasks/bulk — bulk create tasks', () => {
   });
 });
 
+// ── PUT /api/v1/tasks/bulk & DELETE /api/v1/tasks/bulk ────────────────────────
+// Regression coverage for BUG-004 (fixed): these routes were previously
+// shadowed by PUT/DELETE /:id because /:id was registered before /bulk in
+// task.routes.js. Routes are now ordered correctly — these tests assert the
+// bulk handlers (not updateTask/deleteTask) actually run.
+
+describe('PUT /api/v1/tasks/bulk — bulk update tasks', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('200: super_admin bulk-updates tasks by ID', async () => {
+    setupSA();
+    Task.update.mockResolvedValueOnce([2]);
+
+    const taskIds = [TASK_ID, '00000000-0000-4000-8000-000000000009'];
+    const res = await request(app)
+      .put('/api/v1/tasks/bulk')
+      .set('Authorization', authHeader('super_admin'))
+      .send({ taskIds, updates: { priority: 'high' } });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(Task.update).toHaveBeenCalledWith(
+      { priority: 'high' },
+      expect.objectContaining({ where: expect.anything() })
+    );
+  });
+
+  it('400: empty taskIds array rejected by validator', async () => {
+    setupSA();
+
+    const res = await request(app)
+      .put('/api/v1/tasks/bulk')
+      .set('Authorization', authHeader('super_admin'))
+      .send({ taskIds: [], updates: { priority: 'high' } });
+
+    expect(res.status).toBe(400);
+    expect(Task.update).not.toHaveBeenCalled();
+  });
+
+  it('400: non-UUID taskId rejected by validator', async () => {
+    setupSA();
+
+    const res = await request(app)
+      .put('/api/v1/tasks/bulk')
+      .set('Authorization', authHeader('super_admin'))
+      .send({ taskIds: ['not-a-uuid'], updates: { priority: 'high' } });
+
+    expect(res.status).toBe(400);
+    expect(Task.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('DELETE /api/v1/tasks/bulk — bulk archive tasks', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('200: super_admin bulk-archives tasks by ID', async () => {
+    setupSA();
+    Task.update.mockResolvedValueOnce([2]);
+
+    const taskIds = [TASK_ID, '00000000-0000-4000-8000-000000000009'];
+    const res = await request(app)
+      .delete('/api/v1/tasks/bulk')
+      .set('Authorization', authHeader('super_admin'))
+      .send({ taskIds });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(Task.update).toHaveBeenCalledWith(
+      { isArchived: true },
+      expect.objectContaining({ where: expect.anything() })
+    );
+  });
+
+  it('400: empty taskIds array rejected by validator', async () => {
+    setupSA();
+
+    const res = await request(app)
+      .delete('/api/v1/tasks/bulk')
+      .set('Authorization', authHeader('super_admin'))
+      .send({ taskIds: [] });
+
+    expect(res.status).toBe(400);
+    expect(Task.update).not.toHaveBeenCalled();
+  });
+});
+
+// ── PUT /api/v1/tasks/reorder ──────────────────────────────────────────────────
+// No prior coverage existed for this endpoint — added while converting its
+// per-task sequential update/activity-log loops to Promise.all.
+
+describe('PUT /api/v1/tasks/reorder — reorder tasks', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('200: reorders tasks and logs activity for each with the correct position', async () => {
+    setupSA();
+    const taskIds = [TASK_ID, '00000000-0000-4000-8000-000000000009', '00000000-0000-4000-8000-00000000000a'];
+    Task.findAll.mockResolvedValueOnce(taskIds.map((id) => buildTask({ id })));
+    Task.update.mockResolvedValue([1]);
+
+    const res = await request(app)
+      .put('/api/v1/tasks/reorder')
+      .set('Authorization', authHeader('super_admin'))
+      .send({ taskIds, projectId: PRJ_ID, listId: null });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(Task.update).toHaveBeenCalledTimes(3);
+    // Position is 1-indexed by the taskIds array order, not derived from indexOf
+    expect(Task.update).toHaveBeenCalledWith(
+      { position: 1, listId: null },
+      { where: { id: taskIds[0] } }
+    );
+    expect(Task.update).toHaveBeenCalledWith(
+      { position: 3, listId: null },
+      { where: { id: taskIds[2] } }
+    );
+  });
+
+  it('400: a taskId not belonging to the project rejects the whole reorder', async () => {
+    setupSA();
+    const taskIds = [TASK_ID, '00000000-0000-4000-8000-000000000009'];
+    // Only one of the two requested tasks actually belongs to the project
+    Task.findAll.mockResolvedValueOnce([buildTask({ id: TASK_ID })]);
+
+    const res = await request(app)
+      .put('/api/v1/tasks/reorder')
+      .set('Authorization', authHeader('super_admin'))
+      .send({ taskIds, projectId: PRJ_ID });
+
+    expect(res.status).toBe(400);
+    expect(Task.update).not.toHaveBeenCalled();
+  });
+
+  it('400: empty taskIds array rejected', async () => {
+    setupSA();
+
+    const res = await request(app)
+      .put('/api/v1/tasks/reorder')
+      .set('Authorization', authHeader('super_admin'))
+      .send({ taskIds: [], projectId: PRJ_ID });
+
+    expect(res.status).toBe(400);
+  });
+});
+
 // ── POST /api/v1/tasks/:taskId/subtasks ────────────────────────────────────────
 
 describe('POST /api/v1/tasks/:taskId/subtasks — create subtask', () => {
@@ -584,7 +727,11 @@ describe('POST /api/v1/tasks/:taskId/subtasks — create subtask', () => {
 
   it('TASK-028 — 201: super_admin creates a subtask', async () => {
     setupSA();
-    // checkPermission uses req.params.taskId as projectId candidate
+    // checkPermission's auto-resolve (permissions.js:393-399) looks up the task via
+    // req.params.taskId to find its projectId, then the project to find workspaceId —
+    // that's a *separate* Task.findByPk call from the one createSubtask itself makes,
+    // so both need to be queued.
+    Task.findByPk.mockResolvedValueOnce(buildTask()); // consumed by checkPermission auto-resolve
     Project.findByPk.mockResolvedValueOnce({ id: PRJ_ID, workspaceId: WS_ID }); // auto-resolve
     // controller
     Task.findByPk.mockResolvedValueOnce(buildTask());

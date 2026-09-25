@@ -1,34 +1,20 @@
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const logger = require('./utils/logger');
-const { User, Workspace, WorkspaceMembers, Project, ChatRoom, Whiteboard } = require('./models');
+const { User, Project, ChatRoom, Whiteboard } = require('./models');
+const { ensureWorkspaceAccess } = require('./utils/accessControl');
 
 let ioInstance = null;
 
 // Track userId → socketId mapping for targeted notifications
 const userSockets = new Map();
 
-const ensureAccess = async (userId, { workspaceId, projectId }) => {
-  if (projectId) {
-    const project = await Project.findByPk(projectId);
-    if (!project) return { status: 404, message: 'Project not found' };
-    workspaceId = project.workspaceId;
-  }
-
-  if (!workspaceId) {
-    return { status: 400, message: 'Workspace context required' };
-  }
-
-  const workspace = await Workspace.findByPk(workspaceId);
-  if (!workspace) return { status: 404, message: 'Workspace not found' };
-
-  if (workspace.ownerId === userId) return true;
-
-  const member = await WorkspaceMembers.findOne({ where: { workspaceId, userId } });
-  if (!member) return { status: 403, message: 'You do not have access to this workspace' };
-
-  return true;
-};
+// Thin wrapper kept for call-site readability inside this file — delegates to
+// the shared HTTP+socket access check. NOTE: this now also grants super_admin
+// the same bypass the HTTP layer has always had (previously the socket layer
+// required even super_admin to hold real workspace membership — an
+// inconsistency between the two layers, not an intentional restriction).
+const ensureAccess = (user, ctx) => ensureWorkspaceAccess(user, ctx);
 
 const authenticateSocket = async (socket, next) => {
   try {
@@ -52,9 +38,13 @@ const authenticateSocket = async (socket, next) => {
 };
 
 const initSocket = (server) => {
+  const allowedOrigins = process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim())
+    : ['http://localhost:3000', 'http://localhost:3001'];
+
   ioInstance = new Server(server, {
     cors: {
-      origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+      origin: allowedOrigins,
       credentials: true
     }
   });
@@ -86,7 +76,7 @@ const initSocket = (server) => {
         const room = await ChatRoom.findByPk(roomId);
         if (!room) return socket.emit('chat:error', { message: 'Room not found' });
 
-        const access = await ensureAccess(socket.user.id, { workspaceId: room.workspaceId, projectId: room.projectId });
+        const access = await ensureAccess(socket.user, { workspaceId: room.workspaceId, projectId: room.projectId });
         if (access !== true) return socket.emit('chat:error', { message: access.message });
 
         socket.join(`chat:${roomId}`);
@@ -155,7 +145,7 @@ const initSocket = (server) => {
         const whiteboard = await Whiteboard.findByPk(whiteboardId);
         if (!whiteboard) return socket.emit('whiteboard:error', { message: 'Whiteboard not found' });
 
-        const access = await ensureAccess(socket.user.id, { workspaceId: whiteboard.workspaceId, projectId: whiteboard.projectId });
+        const access = await ensureAccess(socket.user, { workspaceId: whiteboard.workspaceId, projectId: whiteboard.projectId });
         if (access !== true) return socket.emit('whiteboard:error', { message: access.message });
 
         socket.join(`whiteboard:${whiteboardId}`);
@@ -180,7 +170,7 @@ const initSocket = (server) => {
       try {
         const project = await Project.findByPk(projectId);
         if (!project) return;
-        const access = await ensureAccess(socket.user.id, { projectId });
+        const access = await ensureAccess(socket.user, { projectId });
         if (access !== true) return;
         socket.join(`project:${projectId}`);
         socket.emit('project:joined', { projectId });
@@ -196,7 +186,7 @@ const initSocket = (server) => {
     // ── Workspace rooms (for member:added live refresh) ────────────────────
     socket.on('workspace:join', async ({ workspaceId }) => {
       try {
-        const access = await ensureAccess(socket.user.id, { workspaceId });
+        const access = await ensureAccess(socket.user, { workspaceId });
         if (access !== true) return;
         socket.join(`workspace:${workspaceId}`);
         socket.emit('workspace:joined', { workspaceId });

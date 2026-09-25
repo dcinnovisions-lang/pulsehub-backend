@@ -4,6 +4,13 @@ const nodemailer = require('nodemailer');
 const { User } = require('../models');
 const logger = require('../utils/logger');
 
+// Falls back to JWT_SECRET when a dedicated refresh secret isn't configured.
+// Single source of truth — read via this helper everywhere a refresh token
+// is signed or verified, rather than repeating the `||` fallback inline.
+const getRefreshSecret = () => process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
+
+const getMailFrom = () => process.env.SMTP_FROM || 'Projva <noreply@projva.dev>';
+
 /**
  * Generate JWT Token
  */
@@ -15,9 +22,12 @@ const generateToken = (id) => {
 
 /**
  * Generate Refresh Token
+ * tokenVersion is embedded so logout() can invalidate every outstanding
+ * refresh token for a user by bumping their stored tokenVersion — see
+ * refreshToken() below, which rejects a token whose version doesn't match.
  */
-const generateRefreshToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, {
+const generateRefreshToken = (id, tokenVersion = 0) => {
+  return jwt.sign({ id, tokenVersion }, getRefreshSecret(), {
     expiresIn: process.env.JWT_REFRESH_EXPIRE || '30d'
   });
 };
@@ -58,26 +68,22 @@ const register = async (req, res, next) => {
 
     // Send verification email (non-fatal — if SMTP not configured, skip)
     try {
-      const transporter = nodemailer.createTransporter({
-        host: process.env.SMTP_HOST,
-        port: parseInt(process.env.SMTP_PORT || '587'),
-        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-      });
+      const transporter = createTransporter();
       const verifyUrl = `${process.env.FRONTEND_URL}/verify-email/${verificationToken}`;
       await transporter.sendMail({
-        from: process.env.SMTP_FROM || 'Projva <noreply@projva.dev>',
+        from: getMailFrom(),
         to: user.email,
         subject: 'Verify your Projva account',
         html: `<h2>Welcome to Projva!</h2><p>Click the link below to verify your email address:</p><a href="${verifyUrl}" style="background:#2563eb;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;">Verify Email</a><p>This link expires in 24 hours.</p>`,
       });
     } catch (emailErr) {
       // Non-fatal: verification email failed, user can resend
-      console.warn('Verification email send failed:', emailErr.message);
+      logger.warn('Verification email send failed:', emailErr.message);
     }
 
     // Generate tokens
     const token = generateToken(user.id);
-    const refreshToken = generateRefreshToken(user.id);
+    const refreshToken = generateRefreshToken(user.id, user.tokenVersion);
 
     res.status(201).json({
       success: true,
@@ -128,6 +134,16 @@ const login = async (req, res, next) => {
       });
     }
 
+    // Workspaces can require single sign-on: those users must use their identity provider
+    const { passwordLoginBlocked } = require('./sso.controller');
+    if (await passwordLoginBlocked(user)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Your organization requires single sign-on. Use "Sign in with SSO" on the login page.',
+        code: 'SSO_REQUIRED'
+      });
+    }
+
     // Check if password matches
     const isMatch = await user.comparePassword(password);
 
@@ -152,7 +168,7 @@ const login = async (req, res, next) => {
 
     // Generate tokens
     const token = generateToken(user.id);
-    const refreshToken = generateRefreshToken(user.id);
+    const refreshToken = generateRefreshToken(user.id, user.tokenVersion);
 
     res.status(200).json({
       success: true,
@@ -192,7 +208,7 @@ const refreshToken = async (req, res, next) => {
     }
 
     // Verify refresh token
-    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET);
+    const decoded = jwt.verify(refreshToken, getRefreshSecret());
 
     // Get user
     const user = await User.findByPk(decoded.id);
@@ -204,9 +220,19 @@ const refreshToken = async (req, res, next) => {
       });
     }
 
+    // Reject tokens issued before the user's last logout. Tokens signed
+    // before this field existed carry no tokenVersion — treat that as 0 so
+    // already-issued tokens for a never-logged-out user keep working.
+    if ((decoded.tokenVersion || 0) !== (user.tokenVersion || 0)) {
+      return res.status(401).json({
+        success: false,
+        error: 'Refresh token has been revoked, please log in again'
+      });
+    }
+
     // Generate new tokens
     const token = generateToken(user.id);
-    const newRefreshToken = generateRefreshToken(user.id);
+    const newRefreshToken = generateRefreshToken(user.id, user.tokenVersion);
 
     res.status(200).json({
       success: true,
@@ -236,9 +262,17 @@ const refreshToken = async (req, res, next) => {
  */
 const logout = async (req, res, next) => {
   try {
+    // Bump tokenVersion so every refresh token issued before this moment is
+    // rejected by refreshToken() above — this is what makes logout actually
+    // revoke access instead of just being a client-side localStorage clear.
+    // Access tokens (short-lived) remain valid until natural expiry, matching
+    // how most JWT-based APIs handle this tradeoff.
+    if (req.user) {
+      await req.user.update({ tokenVersion: req.user.tokenVersion + 1 });
+    }
+
     // Destroy the server-side Express session so the browser's session cookie
-    // becomes invalid on the next request. Token invalidation is left to the
-    // client (localStorage/cookies cleared) since JWTs are stateless.
+    // becomes invalid on the next request.
     if (req.session) {
       await new Promise((resolve, reject) => {
         req.session.destroy((err) => {
@@ -464,7 +498,7 @@ const forgotPassword = async (req, res) => {
       const transporter = createTransporter();
       await transporter.verify(); // fail fast if credentials are wrong
       await transporter.sendMail({
-        from:    process.env.SMTP_FROM || 'Projva <noreply@projva.dev>',
+        from:    getMailFrom(),
         to:      user.email,
         subject: 'Reset your Projva password',
         html:    buildResetEmail(resetUrl, user.firstName),
@@ -536,7 +570,7 @@ const resetPassword = async (req, res) => {
     try {
       const transporter = createTransporter();
       await transporter.sendMail({
-        from:    process.env.SMTP_FROM || 'Projva <noreply@projva.dev>',
+        from:    getMailFrom(),
         to:      user.email,
         subject: 'Your Projva password has been changed',
         html:    buildPasswordChangedEmail(user.firstName),

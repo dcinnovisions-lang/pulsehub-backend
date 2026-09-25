@@ -126,14 +126,8 @@ const getCalendarData = async (req, res, next) => {
 
     if (userId) {
       includeOptions[2].where = { id: userId };
-    } else {
-      // If no userId specified, for members/viewers, show only tasks assigned to them
-      // For admins/owners/pm, show all tasks in accessible projects
-      if (userRole === 'member' || userRole === 'viewer') {
-        includeOptions[2].where = { id: currentUserId };
-      }
-      // For admin, owner, pm - they can see all tasks in their accessible projects
     }
+    // Otherwise show every task of the accessible projects (project membership controls access)
 
     const tasks = await Task.findAll({
       where: whereClause,

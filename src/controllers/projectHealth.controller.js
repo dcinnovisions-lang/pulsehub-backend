@@ -313,18 +313,6 @@ const getStakeholderDashboard = async (req, res, next) => {
           }
         ];
 
-        // For viewers/members, filter tasks by assignee
-        if (userRole === 'member' || userRole === 'viewer') {
-          taskIncludeOptions.push({
-            model: User,
-            as: 'assignees',
-            attributes: ['id'],
-            through: { attributes: [] },
-            where: { id: userId },
-            required: true // INNER JOIN - only tasks assigned to this user
-          });
-        }
-
         const tasks = await Task.findAll({
           where: taskWhereClause,
           include: taskIncludeOptions

@@ -74,7 +74,7 @@ const executeAction = async (action, context, automation) => {
             entityType: 'task',
             entityId: task.id,
             actorId: automation.createdBy,
-            metadata: { url: `/app/projects/${task.projectId}/tasks/${task.id}`, projectId: task.projectId }
+            metadata: { url: `/app/tasks/${task.id}`, projectId: task.projectId }
           });
         }
       }
@@ -97,7 +97,7 @@ const executeAction = async (action, context, automation) => {
             entityType: 'task',
             entityId: task.id,
             actorId: automation.createdBy,
-            metadata: { url: `/app/projects/${task.projectId}/tasks/${task.id}`, projectId: task.projectId }
+            metadata: { url: `/app/tasks/${task.id}`, projectId: task.projectId }
           })
         )
       );

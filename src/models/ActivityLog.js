@@ -25,6 +25,8 @@ const ActivityLog = sequelize.define('ActivityLog', {
     ),
     allowNull: false
   },
+  workspaceId: { type: DataTypes.UUID, allowNull: true, field: 'workspace_id' },
+  projectId: { type: DataTypes.UUID, allowNull: true, field: 'project_id' },
   userId: {
     type: DataTypes.UUID,
     allowNull: false,

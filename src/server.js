@@ -12,6 +12,8 @@ const { Task, User, Status } = require('./models');
 const { createNotification } = require('./controllers/notification.controller');
 
 // ─── Due-soon / Overdue cron ──────────────────────────────────────────────────
+// Finished tasks (Done / Closed / ...) must never trigger due or overdue reminders
+const isOpenTask = (task) => !/^(done|closed|completed|resolved)$/i.test((task.status && task.status.name) || '');
 const runDueSoonCron = async () => {
   try {
     const now = new Date();
@@ -23,23 +25,25 @@ const runDueSoonCron = async () => {
         dueDate: { [Op.between]: [now, in24h] },
         isArchived: false,
       },
-      include: [{ model: User, as: 'assignees', through: { attributes: [] } }],
+      include: [{ model: User, as: 'assignees', through: { attributes: [] } }, { model: Status, as: 'status', attributes: ['name'], required: false }],
     });
 
-    for (const task of dueSoonTasks) {
-      for (const assignee of (task.assignees || [])) {
-        await createNotification({
-          userId: assignee.id,
-          type: 'task_due_soon',
-          title: `Task due soon: "${task.title}"`,
-          body: `This task is due in less than 24 hours.`,
-          entityType: 'task',
-          entityId: task.id,
-          actorId: null,
-          metadata: { url: `/app/projects/${task.projectId}/tasks/${task.id}` },
-        }).catch(() => {});
-      }
-    }
+    await Promise.all(
+      dueSoonTasks.filter(isOpenTask).flatMap((task) =>
+        (task.assignees || []).map((assignee) =>
+          createNotification({
+            userId: assignee.id,
+            type: 'task_due_soon',
+            title: `Task due soon: "${task.title}"`,
+            body: `This task is due in less than 24 hours.`,
+            entityType: 'task',
+            entityId: task.id,
+            actorId: null,
+            metadata: { url: `/app/tasks/${task.id}` },
+          }).catch(() => {})
+        )
+      )
+    );
 
     // Overdue tasks (past due, not archived)
     const overdueTasks = await Task.findAll({
@@ -47,23 +51,25 @@ const runDueSoonCron = async () => {
         dueDate: { [Op.lt]: now },
         isArchived: false,
       },
-      include: [{ model: User, as: 'assignees', through: { attributes: [] } }],
+      include: [{ model: User, as: 'assignees', through: { attributes: [] } }, { model: Status, as: 'status', attributes: ['name'], required: false }],
     });
 
-    for (const task of overdueTasks) {
-      for (const assignee of (task.assignees || [])) {
-        await createNotification({
-          userId: assignee.id,
-          type: 'task_overdue',
-          title: `Task overdue: "${task.title}"`,
-          body: `This task was due on ${new Date(task.dueDate).toLocaleDateString()}.`,
-          entityType: 'task',
-          entityId: task.id,
-          actorId: null,
-          metadata: { url: `/app/projects/${task.projectId}/tasks/${task.id}` },
-        }).catch(() => {});
-      }
-    }
+    await Promise.all(
+      overdueTasks.filter(isOpenTask).flatMap((task) =>
+        (task.assignees || []).map((assignee) =>
+          createNotification({
+            userId: assignee.id,
+            type: 'task_overdue',
+            title: `Task overdue: "${task.title}"`,
+            body: `This task was due on ${new Date(task.dueDate).toLocaleDateString()}.`,
+            entityType: 'task',
+            entityId: task.id,
+            actorId: null,
+            metadata: { url: `/app/tasks/${task.id}` },
+          }).catch(() => {})
+        )
+      )
+    );
   } catch (e) {
     logger.warn('Due-soon cron error:', e.message);
   }
@@ -88,16 +94,16 @@ const runRecurringTaskCron = async () => {
       include: [{ model: User, as: 'assignees', through: { attributes: [] } }]
     });
 
-    for (const task of recurringTasks) {
+    await Promise.all(recurringTasks.map(async (task) => {
       try {
         const recurrence = task.recurrence;
-        if (!recurrence || !recurrence.type || !task.dueDate) continue;
+        if (!recurrence || !recurrence.type || !task.dueDate) return;
 
         // Check endDate — stop recurring if past it
         if (recurrence.endDate && new Date(recurrence.endDate) < now) {
           // Clear recurrence so it won't trigger again
           await task.update({ recurrence: null });
-          continue;
+          return;
         }
 
         const interval = recurrence.interval || 1;
@@ -114,7 +120,7 @@ const runRecurringTaskCron = async () => {
             nextDueDate.setMonth(nextDueDate.getMonth() + interval);
             break;
           default:
-            continue;
+            return;
         }
 
         // Create the next task instance (copy key fields, reset progress)
@@ -142,7 +148,7 @@ const runRecurringTaskCron = async () => {
       } catch (taskErr) {
         logger.warn(`Recurring task cron — error processing task ${task.id}:`, taskErr.message);
       }
-    }
+    }));
   } catch (e) {
     logger.warn('Recurring task cron error:', e.message);
   }
@@ -167,7 +173,7 @@ const scheduleRecurringTaskCron = () => {
   logger.info(`Recurring task cron scheduled — first run in ${Math.round(msUntilMidnight / 1000 / 60)} minutes (at midnight)`);
 };
 
-const REQUIRED_ENV = ['JWT_SECRET', 'DB_NAME', 'DB_USERNAME', 'DB_PASSWORD'];
+const REQUIRED_ENV = ['JWT_SECRET', 'DB_NAME', 'DB_USERNAME', 'DB_PASSWORD', 'FRONTEND_URL'];
 const missing = REQUIRED_ENV.filter(k => !process.env[k]);
 if (missing.length) {
   console.error(`[FATAL] Missing required environment variables: ${missing.join(', ')}`);

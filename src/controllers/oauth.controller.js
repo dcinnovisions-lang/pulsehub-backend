@@ -1,8 +1,8 @@
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const { User } = require('../models');
-const jwt = require('jsonwebtoken');
 const logger = require('../utils/logger');
+const { generateToken, generateRefreshToken } = require('./auth-core.controller');
 
 // Serialize user for session
 passport.serializeUser((user, done) => {
@@ -40,7 +40,7 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
         email: profile.emails[0].value,
         firstName: profile.name.givenName,
         lastName: profile.name.familyName,
-        password: 'oauth_user_' + profile.id, // Dummy password for OAuth users
+        password: require('crypto').randomBytes(32).toString('hex'), // random, unusable password for OAuth-only accounts
         avatar: profile.photos[0]?.value,
         isActive: true
       });
@@ -52,24 +52,6 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
     }
   }));
 }
-
-/**
- * Generate JWT Token
- */
-const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRE || '7d'
-  });
-};
-
-/**
- * Generate Refresh Token
- */
-const generateRefreshToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_REFRESH_EXPIRE || '30d'
-  });
-};
 
 /**
  * @desc    Initiate Google OAuth
@@ -108,7 +90,7 @@ const googleCallback = (req, res, next) => {
 
     // Generate tokens
     const token = generateToken(user.id);
-    const refreshToken = generateRefreshToken(user.id);
+    const refreshToken = generateRefreshToken(user.id, user.tokenVersion);
 
     // Redirect to frontend with tokens
     const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/callback?token=${token}&refreshToken=${refreshToken}`;

@@ -108,7 +108,7 @@ const globalSearch = async (req, res, next) => {
           projectColor: t.project?.color,
           listName:     t.list?.name,
           workspaceId:  t.project?.workspaceId,
-          url:          `/app/projects/${t.projectId}/tasks/${t.id}`
+          url:          `/app/tasks/${t.id}`
         }));
       }
     }

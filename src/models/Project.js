@@ -1,5 +1,6 @@
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/database');
+const { uniqueProjectKey } = require('../utils/issueKeys');
 
 const Project = sequelize.define('Project', {
   id: {
@@ -43,8 +44,23 @@ const Project = sequelize.define('Project', {
     type: DataTypes.UUID,
     allowNull: true,
     field: 'template_id'
+  },
+  key: {
+    type: DataTypes.STRING(10),
+    allowNull: true
+  },
+  taskCounter: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0,
+    field: 'task_counter'
   }
 }, {
+  hooks: {
+    beforeCreate: async (project, options) => {
+      project.key = await uniqueProjectKey(project.name, project.key, options.transaction);
+    }
+  },
   tableName: 'projects',
   timestamps: true,
   underscored: true,
@@ -74,6 +90,9 @@ Project.associate = (models) => {
     foreignKey: 'project_id',
     as: 'tasks'
   });
+
+  Project.hasMany(models.Sprint, { foreignKey: 'projectId', as: 'sprints' });
+  Project.hasMany(models.Release, { foreignKey: 'projectId', as: 'releases' });
   
   Project.hasOne(models.Workflow, {
     foreignKey: 'project_id',

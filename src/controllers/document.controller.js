@@ -1,27 +1,10 @@
-const { Document, Workspace, Project } = require('../models');
+const { Document } = require('../models');
 const { Op } = require('sequelize');
 const logger = require('../utils/logger');
+const { ensureWorkspaceAccess } = require('../utils/accessControl');
 
-const requireAccess = async (req, { workspaceId, projectId }) => {
-  // Super admin already gated by auth; membership enforced via workspace/project lookup
-  if (req.user.role === 'super_admin') return true;
-
-  if (projectId) {
-    const project = await Project.findByPk(projectId);
-    if (!project) return { status: 404, message: 'Project not found' };
-    workspaceId = project.workspaceId;
-  }
-
-  if (!workspaceId) return { status: 400, message: 'Workspace context required' };
-
-  // Check membership
-  const { WorkspaceMembers } = require('../models');
-  const member = await WorkspaceMembers.findOne({ where: { workspaceId, userId: req.user.id } });
-  if (!member && req.user.role !== 'owner') {
-    return { status: 403, message: 'You do not have access to this workspace' };
-  }
-  return true;
-};
+const requireAccess = (req, { workspaceId, projectId }) =>
+  ensureWorkspaceAccess(req.user, { workspaceId, projectId });
 
 exports.createDocument = async (req, res, next) => {
   try {

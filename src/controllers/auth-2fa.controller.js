@@ -193,7 +193,7 @@ const verify2FALogin = async (req, res, next) => {
 
     // Generate tokens
     const jwtToken = generateToken(user.id);
-    const refreshToken = generateRefreshToken(user.id);
+    const refreshToken = generateRefreshToken(user.id, user.tokenVersion);
 
     // Update last login
     await user.update({ lastLogin: new Date() });
@@ -224,7 +224,7 @@ const verify2FALogin = async (req, res, next) => {
  * @route   POST /api/v1/auth/2fa/backup-login
  * @access  Public
  */
-const backupLogin = async (req, res) => {
+const backupLogin = async (req, res, next) => {
   try {
     const { email, backupCode } = req.body;
     const user = await User.findOne({ where: { email } });
@@ -244,10 +244,11 @@ const backupLogin = async (req, res) => {
     await user.update({ twoFactorBackupCodes: codes });
 
     const token = generateToken(user.id);
-    const refreshToken = generateRefreshToken(user.id);
+    const refreshToken = generateRefreshToken(user.id, user.tokenVersion);
     res.json({ success: true, token, refreshToken, user: { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName, role: user.role } });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    logger.error('Backup login error:', error);
+    next(error);
   }
 };
 

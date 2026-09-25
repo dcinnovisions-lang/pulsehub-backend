@@ -1,23 +1,10 @@
-const { Whiteboard, WhiteboardElement, Project } = require('../models');
+const { Whiteboard, WhiteboardElement } = require('../models');
 const logger = require('../utils/logger');
 const { emitWhiteboardUpdate } = require('../socket');
+const { ensureWorkspaceAccess } = require('../utils/accessControl');
 
-const requireAccess = async (req, { workspaceId, projectId }) => {
-  if (req.user.role === 'super_admin') return true;
-  if (projectId) {
-    const project = await Project.findByPk(projectId);
-    if (!project) return { status: 404, message: 'Project not found' };
-    workspaceId = project.workspaceId;
-  }
-  if (!workspaceId) return { status: 400, message: 'Workspace context required' };
-  const { WorkspaceMembers, Workspace } = require('../models');
-  const workspace = await Workspace.findByPk(workspaceId);
-  if (!workspace) return { status: 404, message: 'Workspace not found' };
-  if (workspace.ownerId === req.user.id) return true;
-  const member = await WorkspaceMembers.findOne({ where: { workspaceId, userId: req.user.id } });
-  if (!member) return { status: 403, message: 'You do not have access to this workspace' };
-  return true;
-};
+const requireAccess = (req, { workspaceId, projectId }) =>
+  ensureWorkspaceAccess(req.user, { workspaceId, projectId });
 
 exports.createWhiteboard = async (req, res, next) => {
   try {
@@ -76,8 +63,11 @@ exports.upsertElements = async (req, res, next) => {
     if (req.user.role === 'guest') return res.status(403).json({ success: false, error: 'Guests cannot edit whiteboards' });
 
     const { elements = [] } = req.body;
-    const saved = [];
-    for (const el of elements) {
+    // Each element is an independent row (update-existing or create-new) —
+    // Promise.all keeps this a single round of concurrent writes instead of
+    // one sequential DB round-trip per element. .map() preserves the input
+    // order in `saved` regardless of which write resolves first.
+    const saved = await Promise.all(elements.map(async (el) => {
       if (el.id) {
         const existing = await WhiteboardElement.findByPk(el.id);
         if (existing) {
@@ -94,11 +84,10 @@ exports.upsertElements = async (req, res, next) => {
             locked: !!el.locked,
             updatedBy: req.user.id
           });
-          saved.push(existing);
-          continue;
+          return existing;
         }
       }
-      const created = await WhiteboardElement.create({
+      return WhiteboardElement.create({
         whiteboardId,
         type: el.type || 'sticky',
         data: el.data,
@@ -113,8 +102,7 @@ exports.upsertElements = async (req, res, next) => {
         createdBy: req.user.id,
         updatedBy: req.user.id
       });
-      saved.push(created);
-    }
+    }));
 
     emitWhiteboardUpdate(whiteboardId, { whiteboardId, elements: saved });
     res.status(200).json({ success: true, data: saved });

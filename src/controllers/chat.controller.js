@@ -1,8 +1,9 @@
-const { ChatRoom, ChatMessage, Project, User, WorkspaceMembers, sequelize } = require('../models');
+const { ChatRoom, ChatMessage, User, WorkspaceMembers, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const logger = require('../utils/logger');
 const { emitChatMessage } = require('../socket');
 const { createNotification } = require('./notification.controller');
+const { ensureWorkspaceAccess } = require('../utils/accessControl');
 const multer = require('multer');
 const path = require('path');
 const fsPromises = require('fs').promises;
@@ -11,22 +12,8 @@ const fsPromises = require('fs').promises;
 const CHAT_UPLOAD_DIR = path.join(__dirname, '../../uploads/chat');
 fsPromises.mkdir(CHAT_UPLOAD_DIR, { recursive: true }).catch(() => {});
 
-const requireAccess = async (req, { workspaceId, projectId }) => {
-  if (req.user.role === 'super_admin') return true;
-  if (projectId) {
-    const project = await Project.findByPk(projectId);
-    if (!project) return { status: 404, message: 'Project not found' };
-    workspaceId = project.workspaceId;
-  }
-  if (!workspaceId) return { status: 400, message: 'Workspace context required' };
-  const { WorkspaceMembers, Workspace } = require('../models');
-  const workspace = await Workspace.findByPk(workspaceId);
-  if (!workspace) return { status: 404, message: 'Workspace not found' };
-  if (workspace.ownerId === req.user.id) return true;
-  const member = await WorkspaceMembers.findOne({ where: { workspaceId, userId: req.user.id } });
-  if (!member) return { status: 403, message: 'You do not have access to this workspace' };
-  return true;
-};
+const requireAccess = (req, { workspaceId, projectId }) =>
+  ensureWorkspaceAccess(req.user, { workspaceId, projectId });
 
 exports.createRoom = async (req, res, next) => {
   try {

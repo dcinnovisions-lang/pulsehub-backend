@@ -16,14 +16,37 @@ const { globalLimiter, writeLimiter } = require('./middleware/rateLimiter');
 // Import routes
 const apiRoutes = require('./routes');
 
+// Non-fatal check for env vars app.js/its middleware read directly, so any
+// entry point that imports this module (not just server.js) gets a loud
+// warning instead of silently producing broken auth or broken email links.
+// NOTE: intentionally does NOT check DB_* vars or process.exit() here — this
+// module is imported directly by the test suite with mocked models and no
+// real DB connection, so a fatal DB check belongs in server.js (the actual
+// process entrypoint), not here.
+['JWT_SECRET', 'FRONTEND_URL'].filter(k => !process.env[k]).forEach(k => {
+  console.warn(`[WARN] ${k} is not set — auth/email links may be broken`);
+});
+
 const app = express();
+
+// Behind Nginx: trust one proxy hop so rate limiting sees real client IPs
+app.set('trust proxy', 1);
 
 // Security middleware
 app.use(helmet());
 
-// CORS configuration
+// CORS configuration — allow both common React dev ports
+const allowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
+  : ['http://localhost:3000', 'http://localhost:3001'];
+
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (curl, Postman, server-to-server)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -50,9 +73,9 @@ app.use(passport.initialize());
 // signature. Registering it here before express.json() ensures the body is
 // not consumed/parsed before the webhook handler can verify it.
 const { handleWebhook } = require('./controllers/billing.controller');
-const API_VERSION_WEBHOOK = process.env.API_VERSION || 'v1';
+const API_VERSION = process.env.API_VERSION || 'v1';
 app.post(
-  `/api/${API_VERSION_WEBHOOK}/billing/webhook`,
+  `/api/${API_VERSION}/billing/webhook`,
   express.raw({ type: 'application/json' }),
   handleWebhook
 );
@@ -94,7 +117,6 @@ app.get('/health', (req, res) => {
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // API routes
-const API_VERSION = process.env.API_VERSION || 'v1';
 app.use(`/api/${API_VERSION}`, apiRoutes);
 
 // 404 handler

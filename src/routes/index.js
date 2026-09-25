@@ -1,6 +1,10 @@
 const express = require('express');
 const router = express.Router();
 
+// Records security- and admin-relevant requests in the audit log
+const { auditTrail } = require('../middleware/auditTrail');
+router.use(auditTrail);
+
 // Import route modules
 const authRoutes = require('./auth.routes');
 const userRoutes = require('./user.routes');
@@ -31,6 +35,13 @@ const searchRoutes = require('./search.routes');
 const automationRoutes = require('./automation.routes');
 const guestAccessRoutes = require('./guestAccess.routes');
 const billingRoutes     = require('./billing.routes');
+const apiKeyRoutes      = require('./apiKey.routes');
+const sprintRoutes      = require('./sprint.routes');
+const issueSearchRoutes = require('./issueSearch.routes');
+const issueImportRoutes = require('./issueImport.routes');
+const auditRoutes = require('./audit.routes');
+const permissionSchemeRoutes = require('./permissionScheme.routes');
+const ssoRoutes = require('./sso.routes');
 
 // Health check
 router.get('/health', (req, res) => {
@@ -72,6 +83,13 @@ router.use('/', documentRoutes); // Documents
 router.use('/', whiteboardRoutes); // Whiteboards
 router.use('/', chatRoutes);    // Chat
 router.use('/billing', billingRoutes); // Billing / Razorpay
+router.use('/api-keys', apiKeyRoutes); // Personal API keys
+router.use('/', sprintRoutes); // Sprints, backlog, epics, releases
+router.use('/issues', issueSearchRoutes); // Advanced issue search (query language)
+router.use('/', issueImportRoutes); // Jira / CSV import
+router.use('/audit-logs', auditRoutes); // Security & admin audit log
+router.use('/', permissionSchemeRoutes); // Configurable permission schemes
+router.use('/', ssoRoutes); // Single sign-on (OpenID Connect)
 
 module.exports = router;
 

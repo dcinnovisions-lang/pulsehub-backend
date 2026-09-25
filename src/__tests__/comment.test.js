@@ -243,6 +243,9 @@ describe('POST /api/v1/tasks/:taskId/comments — create comment', () => {
 
   it('CMT-001 — 201: super_admin creates a comment', async () => {
     setupSA();
+    // checkPermission's :taskId auto-resolve (permissions.js:393-399) makes its own
+    // Task.findByPk call before the controller's — both need a queued mock.
+    Task.findByPk.mockResolvedValueOnce(buildTask()); // consumed by checkPermission auto-resolve
     Task.findByPk.mockResolvedValueOnce(buildTask());
     Comment.create.mockResolvedValueOnce({ id: CMT_ID });
     Comment.findByPk.mockResolvedValueOnce(buildComment());   // reload
@@ -301,6 +304,7 @@ describe('POST /api/v1/tasks/:taskId/comments — create comment', () => {
     const parent = buildComment({ id: PARENT_ID, parentId: null, taskId: TASK_ID });
     const reply  = buildComment({ parentId: PARENT_ID });
 
+    Task.findByPk.mockResolvedValueOnce(buildTask()); // consumed by checkPermission auto-resolve
     Task.findByPk.mockResolvedValueOnce(buildTask());
     Comment.findByPk.mockResolvedValueOnce(parent);   // parent existence check
     Comment.create.mockResolvedValueOnce({ id: CMT_ID });
@@ -331,6 +335,7 @@ describe('POST /api/v1/tasks/:taskId/comments — create comment', () => {
 
   it('CMT-016 — 201: markdown content stored as-is', async () => {
     setupSA();
+    Task.findByPk.mockResolvedValueOnce(buildTask()); // consumed by checkPermission auto-resolve
     Task.findByPk.mockResolvedValueOnce(buildTask());
     Comment.create.mockResolvedValueOnce({ id: CMT_ID });
     Comment.findByPk.mockResolvedValueOnce(buildComment({ content: '**bold** _italic_' }));
@@ -568,20 +573,31 @@ describe('PUT /DELETE /api/v1/comments/:id — author-only enforcement', () => {
 // ── CMT-012 / CMT-013: @mention notifications ────────────────────────────────
 
 describe('POST /api/v1/tasks/:taskId/comments — @mention notifications', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Mention resolution: project members + workspace members + workspace owner
+    Project.findByPk.mockResolvedValue({ id: PRJ_ID, workspaceId: WS_ID });
+    WorkspaceMembers.findAll.mockResolvedValue([]);
+    Workspace.findByPk.mockResolvedValue({ id: WS_ID, ownerId: 'owner-user-id' });
+  });
+  afterEach(() => {
+    Project.findByPk.mockReset();
+    WorkspaceMembers.findAll.mockReset();
+    Workspace.findByPk.mockReset();
+    User.findAll.mockReset();
+  });
 
   it('CMT-012 — 201: @mention in content triggers notification for matched member', async () => {
     setupSA();
+    Task.findByPk.mockResolvedValueOnce(buildTask()); // consumed by checkPermission auto-resolve
     Task.findByPk.mockResolvedValueOnce(buildTask());
     Comment.create.mockResolvedValueOnce({ id: CMT_ID });
     Comment.findByPk.mockResolvedValueOnce(buildComment({ content: '@regularmember hello' }));
     TaskAssignees.findAll.mockResolvedValueOnce([]);
     // @mention resolution
-    ProjectMembers.findAll.mockResolvedValueOnce([
-      {
-        userId: mockUsers.member.id,
-        user: { id: mockUsers.member.id, firstName: 'Regular', lastName: 'Member' }
-      }
+    ProjectMembers.findAll.mockResolvedValueOnce([{ userId: mockUsers.member.id }]);
+    User.findAll.mockResolvedValueOnce([
+      { id: mockUsers.member.id, firstName: 'Regular', lastName: 'Member', email: 'regular@test.io' }
     ]);
 
     const res = await request(app)
@@ -595,14 +611,39 @@ describe('POST /api/v1/tasks/:taskId/comments — @mention notifications', () =>
     );
   });
 
+  it('CMT-012b — 201: workspace owner who is not a project member can be @mentioned', async () => {
+    setupSA();
+    Task.findByPk.mockResolvedValueOnce(buildTask());
+    Task.findByPk.mockResolvedValueOnce(buildTask());
+    Comment.create.mockResolvedValueOnce({ id: CMT_ID });
+    Comment.findByPk.mockResolvedValueOnce(buildComment({ content: '@olivia.owner please review' }));
+    TaskAssignees.findAll.mockResolvedValueOnce([]);
+    ProjectMembers.findAll.mockResolvedValueOnce([]);
+    User.findAll.mockResolvedValueOnce([
+      { id: 'owner-user-id', firstName: 'Olivia', lastName: 'Owner', email: 'olivia.owner@test.io' }
+    ]);
+
+    const res = await request(app)
+      .post(`/api/v1/tasks/${TASK_ID}/comments`)
+      .set('Authorization', authHeader('super_admin'))
+      .send({ content: '@oliviaowner please review' });
+
+    expect(res.status).toBe(201);
+    expect(createNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'task_mentioned', userId: 'owner-user-id' })
+    );
+  });
+
   it('CMT-013 — 201: @mention with no matching project member saves comment, no notification', async () => {
     setupSA();
+    Task.findByPk.mockResolvedValueOnce(buildTask()); // consumed by checkPermission auto-resolve
     Task.findByPk.mockResolvedValueOnce(buildTask());
     Comment.create.mockResolvedValueOnce({ id: CMT_ID });
     Comment.findByPk.mockResolvedValueOnce(buildComment({ content: '@unknownuser hello' }));
     TaskAssignees.findAll.mockResolvedValueOnce([]);
-    // No project members with matching handle
+    // No one with a matching handle
     ProjectMembers.findAll.mockResolvedValueOnce([]);
+    User.findAll.mockResolvedValueOnce([]);
 
     const res = await request(app)
       .post(`/api/v1/tasks/${TASK_ID}/comments`)
@@ -625,6 +666,7 @@ describe('POST /api/v1/tasks/:taskId/comments — XSS content', () => {
   it('CMT-017 — 201: XSS content stored as plain string (no sanitization at API layer)', async () => {
     const xssContent = '<script>alert("xss")</script>';
     setupSA();
+    Task.findByPk.mockResolvedValueOnce(buildTask()); // consumed by checkPermission auto-resolve
     Task.findByPk.mockResolvedValueOnce(buildTask());
     Comment.create.mockResolvedValueOnce({ id: CMT_ID });
     Comment.findByPk.mockResolvedValueOnce(buildComment({ content: xssContent }));

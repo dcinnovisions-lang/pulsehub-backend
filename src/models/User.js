@@ -81,6 +81,7 @@ const User = sequelize.define('User', {
   passwordResetToken:  { type: DataTypes.STRING(255), allowNull: true, field: 'password_reset_token' },
   passwordResetExpiry: { type: DataTypes.DATE, allowNull: true, field: 'password_reset_expiry' },
   timezone: { type: DataTypes.STRING, defaultValue: 'UTC', allowNull: true },
+  notificationPrefs: { type: DataTypes.JSONB, allowNull: true, field: 'notification_prefs' },
   bio: { type: DataTypes.TEXT, allowNull: true },
   twoFactorBackupCodes: { type: DataTypes.JSONB, defaultValue: [], field: 'twoFactorBackupCodes' },
 
@@ -98,6 +99,14 @@ const User = sequelize.define('User', {
     defaultValue: 'free',
     allowNull: false,
     field: 'plan_id'
+  },
+  // Incremented on logout to invalidate every refresh token issued before that
+  // point (see auth-core.controller.js generateRefreshToken/refreshToken/logout).
+  tokenVersion: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
+    allowNull: false,
+    field: 'token_version'
   }
 }, {
   tableName: 'users',

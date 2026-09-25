@@ -7,6 +7,12 @@
 const { Notification, User } = require('../models');
 const { Op } = require('sequelize');
 const logger = require('../utils/logger');
+const { sendMail, notificationEmail } = require('../utils/mailer');
+
+const { channelEnabled } = require('../utils/notificationPrefs');
+
+// Due-soon / overdue jobs run hourly — only tell someone about the same task once per day
+const DEDUPE_TYPES = new Set(['task_due_soon', 'task_overdue']);
 
 // ─── Internal helper — called by other controllers ──────────────────────────
 /**
@@ -27,6 +33,48 @@ const createNotification = async (opts) => {
   try {
     // Never notify the actor about their own action
     if (opts.userId === opts.actorId) return null;
+
+    // Recipient + their preferences (a lookup failure must not block the in-app notification)
+    let recipient = null;
+    try {
+      recipient = await User.findByPk(opts.userId, { attributes: ['id', 'email', 'firstName', 'isActive', 'notificationPrefs'] });
+    } catch (_) { /* use defaults */ }
+    if (recipient && recipient.isActive === false) return null;
+    const prefs = recipient ? recipient.notificationPrefs : null;
+
+    if (DEDUPE_TYPES.has(opts.type) && opts.entityId) {
+      const recent = await Notification.findOne({
+        where: {
+          userId: opts.userId,
+          type: opts.type,
+          entityId: opts.entityId,
+          createdAt: { [Op.gt]: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+        },
+        attributes: ['id']
+      });
+      if (recent) return null;
+    }
+
+    // Email channel (fire-and-forget, only when SMTP is configured and the user has not opted out)
+    if (recipient && recipient.email && channelEnabled(prefs, opts.type, 'email')) {
+      (async () => {
+        let actorName = null;
+        if (opts.actorId) {
+          try {
+            const actor = await User.findByPk(opts.actorId, { attributes: ['firstName', 'lastName'] });
+            if (actor) actorName = `${actor.firstName || ''} ${actor.lastName || ''}`.trim() || null;
+          } catch (_) { /* optional */ }
+        }
+        const { html, text } = notificationEmail({
+          firstName: recipient.firstName, title: opts.title, body: opts.body,
+          url: opts.metadata && opts.metadata.url, actorName
+        });
+        await sendMail({ to: recipient.email, subject: opts.title, html, text });
+      })().catch((e) => logger.warn('Notification email failed (non-fatal):', e.message));
+    }
+
+    // In-app channel
+    if (!channelEnabled(prefs, opts.type, 'inApp')) return null;
 
     const notification = await Notification.create({
       userId:     opts.userId,

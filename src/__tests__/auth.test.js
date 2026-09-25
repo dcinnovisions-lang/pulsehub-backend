@@ -590,6 +590,7 @@ describe('POST /api/v1/auth/2fa/disable', () => {
   it('200 — disables 2FA', async () => {
     const user = buildMockUser({ twoFactorEnabled: true, twoFactorSecret: 'secret' });
     User.findByPk.mockResolvedValue(user);
+    speakeasy.totp.verify.mockReturnValue(true); // TOTP check in the controller (auth-2fa.controller.js:128-133) must pass
 
     const res = await request(app)
       .post('/api/v1/auth/2fa/disable')
@@ -805,6 +806,36 @@ describe('POST /api/v1/auth/refresh-token — post-logout', () => {
       .post('/api/v1/auth/refresh-token')
       .send({ refreshToken: expiredRefresh });
     expect(res.status).toBe(401);
+  });
+
+  it('401 — a still-unexpired refresh token issued before logout is rejected after logout (tokenVersion revocation)', async () => {
+    // 1. Log in — issues a refresh token carrying tokenVersion: 0.
+    const user = buildMockUser({ comparePassword: jest.fn().mockResolvedValue(true), tokenVersion: 0 });
+    User.findOne.mockResolvedValueOnce(user); // login()
+
+    const loginRes = await request(app)
+      .post('/api/v1/auth/login')
+      .send({ email: user.email, password: 'Password1!' });
+    expect(loginRes.status).toBe(200);
+    const { refreshToken } = loginRes.body.data;
+
+    // 2. Log out — bumps the user's stored tokenVersion to 1.
+    User.findByPk.mockResolvedValueOnce(user); // authenticate() for /logout
+    const logoutRes = await request(app)
+      .post('/api/v1/auth/logout')
+      .set('Authorization', authHeader(user.id));
+    expect(logoutRes.status).toBe(200);
+    expect(user.update).toHaveBeenCalledWith({ tokenVersion: 1 });
+
+    // 3. Reuse the pre-logout refresh token (still carries tokenVersion: 0)
+    //    against a user record that now reports tokenVersion: 1 — must be rejected.
+    User.findByPk.mockResolvedValueOnce({ ...user, tokenVersion: 1, isActive: true });
+    const reuseRes = await request(app)
+      .post('/api/v1/auth/refresh-token')
+      .send({ refreshToken });
+
+    expect(reuseRes.status).toBe(401);
+    expect(reuseRes.body.error).toMatch(/revoked/i);
   });
 });
 

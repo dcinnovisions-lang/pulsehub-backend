@@ -107,13 +107,6 @@ const getGanttData = async (req, res, next) => {
       order: [['position', 'ASC']]
     });
 
-    // Filter by role if needed
-    if (userRole === 'member' || userRole === 'viewer') {
-      tasks = tasks.filter(task => 
-        task.assignees && task.assignees.some(a => a.id === userId)
-      );
-    }
-
     // Get all dependencies for these tasks
     const taskIds = tasks.map(t => t.id);
     const dependencies = await TaskDependency.findAll({

@@ -22,7 +22,8 @@ const bulkCreateTasks = async (req, res, next) => {
       tasks.map(task => ({
         ...task,
         createdBy: req.user.id
-      }))
+      })),
+      { individualHooks: true }
     );
 
     res.status(201).json({

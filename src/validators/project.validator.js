@@ -8,7 +8,7 @@ const handleValidationErrors = (req, res, next) => {
   next();
 };
 
-const PROJECT_ROLES = ['project_lead', 'developer', 'designer', 'qa', 'viewer'];
+const PROJECT_ROLES = ['project_lead', 'contributor', 'reporter', 'reviewer', 'commenter', 'viewer'];
 
 const validateCreateProject = [
   body('name')
